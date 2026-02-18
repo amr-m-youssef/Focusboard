@@ -1,24 +1,32 @@
 // netlify/functions/generate.js
-// Uses Anthropic Messages API. Expects env var: ANTHROPIC_API_KEY
-// Optional env vars: ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS
+// Netlify Serverless Function: calls Anthropic Messages API.
+// Make sure you set ANTHROPIC_API_KEY in Netlify Environment variables.
 
-export async function handler(event) {
-  // Basic CORS (adjust origin if you want to lock it down)
-  const corsHeaders = {
+const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+// Use an API-supported model id (Claude app names ≠ API model ids).
+// Supported example: "claude-sonnet-4-6" (see Anthropic docs).
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+
+function corsHeaders() {
+  return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Content-Type": "application/json",
   };
+}
 
+exports.handler = async (event) => {
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: corsHeaders, body: "" };
+    return { statusCode: 204, headers: corsHeaders(), body: "" };
   }
 
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Method not allowed" }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: "Method not allowed. Use POST." }),
     };
   }
 
@@ -26,14 +34,13 @@ export async function handler(event) {
   if (!apiKey) {
     return {
       statusCode: 500,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Missing ANTHROPIC_API_KEY env var" }),
+      headers: corsHeaders(),
+      body: JSON.stringify({
+        error:
+          "Missing ANTHROPIC_API_KEY. Add it in Netlify: Site settings → Environment variables.",
+      }),
     };
   }
-
-  // Per Anthropic docs (Feb 2026): claude-sonnet-4-6 is a valid Claude API ID
-  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-  const maxTokens = Number(process.env.ANTHROPIC_MAX_TOKENS || 1400);
 
   let payload;
   try {
@@ -41,98 +48,70 @@ export async function handler(event) {
   } catch (e) {
     return {
       statusCode: 400,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Invalid JSON body" }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: "Invalid JSON body." }),
     };
   }
 
-  const userPrompt = (payload && payload.prompt ? String(payload.prompt) : "").trim();
-  if (!userPrompt) {
-    return {
-      statusCode: 400,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: "Missing 'prompt' in request body" }),
-    };
-  }
-
-  const systemPrompt = `
-You are an assistant that converts a plain-language weekly update into a structured "Team Focus Board".
-Return ONLY JSON (no markdown). The JSON must match this exact schema:
-
-{
-  "leadersMessage": "string",
-  "topPriorities": [
-    {"title":"string","status":"IN_PROGRESS|ON_TRACK|AT_RISK|DONE","ask":"string"},
-    {"title":"string","status":"IN_PROGRESS|ON_TRACK|AT_RISK|DONE","ask":"string"},
-    {"title":"string","status":"IN_PROGRESS|ON_TRACK|AT_RISK|DONE","ask":"string"}
-  ],
-  "wins": ["string","string","string"],
-  "risks": ["string","string","string"],
-  "asks": ["string","string","string"]
-}
-
-Rules:
-- Keep each string concise (<= 180 chars).
-- If info is missing, make reasonable business-safe assumptions (no confidential data).
-- Use realistic supply-chain language.
-`.trim();
+  const system = payload.system || "";
+  const messages = payload.messages || [];
+  const max_tokens = Number(payload.max_tokens || 900);
 
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    const resp = await fetch(ANTHROPIC_API_URL, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
       },
       body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        messages: [{ role: "user", content: userPrompt }],
+        model: MODEL,
+        max_tokens,
+        system,
+        messages,
+        temperature: typeof payload.temperature === "number" ? payload.temperature : 0.5,
       }),
     });
 
-    const data = await resp.json().catch(() => null);
+    const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
+      // Forward a clean error back to the UI
       return {
         statusCode: resp.status,
-        headers: corsHeaders,
+        headers: corsHeaders(),
         body: JSON.stringify({
           error: "Anthropic API request failed",
-          status: resp.status,
           details: data,
+          model: MODEL,
         }),
       };
     }
 
-    // IMPORTANT: index_updated.html expects the raw Anthropic Messages response
-    // with a `content` array like: [{ type: "text", text: "..." }]
-    if (!data || !Array.isArray(data.content)) {
-      return {
-        statusCode: 502,
-        headers: corsHeaders,
-        body: JSON.stringify({
-          error: "Unexpected Anthropic response shape",
-          details: data,
-        }),
-      };
-    }
+    // Anthropic returns content blocks. We extract combined text for convenience.
+    const text =
+      Array.isArray(data.content)
+        ? data.content
+            .filter((b) => b && b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text)
+            .join("\n")
+        : "";
 
     return {
       statusCode: 200,
-      headers: { ...corsHeaders, "content-type": "application/json" },
-      body: JSON.stringify(data),
+      headers: corsHeaders(),
+      body: JSON.stringify({ text, raw: data }),
     };
   } catch (err) {
     return {
       statusCode: 500,
-      headers: corsHeaders,
+      headers: corsHeaders(),
       body: JSON.stringify({
-        error: "Server error",
-        message: err && err.message ? err.message : String(err),
+        error: "Server error calling Anthropic API",
+        message: err?.message || String(err),
+        model: MODEL,
       }),
     };
   }
-}
+};
