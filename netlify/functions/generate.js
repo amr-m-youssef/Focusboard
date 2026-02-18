@@ -1,96 +1,116 @@
 // netlify/functions/generate.js
+// Netlify Serverless Function: calls Anthropic Messages API.
+// Make sure you set ANTHROPIC_API_KEY in Netlify Environment variables.
 
-exports.handler = async function (event) {
-  // CORS (preflight)
+const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+// Use an API-supported model id (Claude app names ≠ API model ids).
+// Supported example: "claude-sonnet-4-6" (see Anthropic docs).
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Content-Type": "application/json",
+  };
+}
+
+exports.handler = async (event) => {
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-      body: "",
-    };
+    return { statusCode: 204, headers: corsHeaders(), body: "" };
   }
 
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-      },
-      body: "Method Not Allowed",
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: "Method not allowed. Use POST." }),
     };
   }
 
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers: corsHeaders(),
+      body: JSON.stringify({
+        error:
+          "Missing ANTHROPIC_API_KEY. Add it in Netlify: Site settings → Environment variables.",
+      }),
+    };
+  }
+
+  let payload;
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return {
-        statusCode: 500,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-        },
-        body: JSON.stringify({
-          error: "Missing ANTHROPIC_API_KEY in Netlify environment variables.",
-        }),
-      };
-    }
+    payload = JSON.parse(event.body || "{}");
+  } catch (e) {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: "Invalid JSON body." }),
+    };
+  }
 
-    const body = JSON.parse(event.body || "{}");
+  const system = payload.system || "";
+  const messages = payload.messages || [];
+  const max_tokens = Number(payload.max_tokens || 900);
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+  try {
+    const resp = await fetch(ANTHROPIC_API_URL, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-20241022",
-        max_tokens: 1000,
-        system: body.system || "",
-        messages: body.messages || [],
+        model: MODEL,
+        max_tokens,
+        system,
+        messages,
+        temperature: typeof payload.temperature === "number" ? payload.temperature : 0.5,
       }),
     });
 
-    // Return real error text if Anthropic rejects the request
-    if (!response.ok) {
-      const errorText = await response.text();
+    const data = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      // Forward a clean error back to the UI
       return {
-        statusCode: response.status,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        },
+        statusCode: resp.status,
+        headers: corsHeaders(),
         body: JSON.stringify({
           error: "Anthropic API request failed",
-          status: response.status,
-          details: errorText,
+          details: data,
+          model: MODEL,
         }),
       };
     }
 
-    const data = await response.json();
+    // Anthropic returns content blocks. We extract combined text for convenience.
+    const text =
+      Array.isArray(data.content)
+        ? data.content
+            .filter((b) => b && b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text)
+            .join("\n")
+        : "";
 
     return {
       statusCode: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-      body: JSON.stringify(data),
+      headers: corsHeaders(),
+      body: JSON.stringify({ text, raw: data }),
     };
   } catch (err) {
     return {
       statusCode: 500,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({
-        error: "Function crashed",
-        details: err?.message || String(err),
+        error: "Server error calling Anthropic API",
+        message: err?.message || String(err),
+        model: MODEL,
       }),
     };
   }
