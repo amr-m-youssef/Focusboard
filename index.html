@@ -252,7 +252,7 @@ function generateBoard() {
 
   var systemPrompt = 'You are a chief of staff AI for a senior supply chain leader at Kenvue, Head of Supply Chain MENAP. Given a brain-dump about their week, return ONLY a raw JSON object with no markdown fences, no explanation, no preamble. Format: {"leaderMessage":"Sharp punchy 1-sentence first-person message, not corporate speak","priorities":[{"title":"Action-oriented priority max 10 words","status":"red","ask":"Specific concrete team ask with deadline 1-2 sentences"},{"title":"second priority","status":"amber","ask":"second ask"},{"title":"third priority","status":"green","ask":"third ask"}]} Status: red=urgent blocker, amber=needs attention, green=on track. Order by urgency descending. Return ONLY the JSON.';
 
-  fetch('/netlify/functions/generate', {
+  fetch('/.netlify/functions/generate', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
